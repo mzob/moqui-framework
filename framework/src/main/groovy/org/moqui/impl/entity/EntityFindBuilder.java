@@ -15,6 +15,7 @@ package org.moqui.impl.entity;
 
 import org.moqui.entity.EntityException;
 import org.moqui.impl.entity.condition.EntityConditionImplBase;
+import org.moqui.impl.entity.EntityJavaUtil.FieldOrderOptions;
 import org.moqui.util.MNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -70,51 +71,27 @@ public class EntityFindBuilder extends EntityQueryBuilder {
         }
     }
 
-    public void makeDistinct() {
-        sqlTopLevel.append("DISTINCT ");
-    }
+    public void makeDistinct() { sqlTopLevel.append("DISTINCT "); }
 
-    public void makeCountFunction(FieldInfo[] fieldInfoArray) {
-        EntityDefinition localEd = getMainEntityDefinition();
-        ArrayList<MNode> entityConditionList = localEd.internalEntityNode.children("entity-condition");
-        MNode entityConditionNode = entityConditionList != null && entityConditionList.size() > 0 ? entityConditionList.get(0) : null;
-        boolean isDistinct = entityFindBase.getDistinct() || (localEd.isViewEntity && entityConditionNode != null &&
-                "true".equals(entityConditionNode.attribute("distinct")));
-        boolean isGroupBy = localEd.entityInfo.hasFunctionAlias;
-
-        if (isGroupBy) sqlTopLevel.append("COUNT(*) FROM (SELECT ");
-
-        if (isDistinct) {
-            // old style, not sensitive to selecting limited columns: sql.append("DISTINCT COUNT(*) ")
-
-            /* NOTE: the code below was causing problems so the line above may be used instead, in view-entities in
-             * some cases it seems to cause the "COUNT(DISTINCT " to appear twice, causing an attempt to try to count
-             * a count (function="count-distinct", distinct=true in find options)
-             */
-            if (fieldInfoArray.length > 0) {
-                // TODO: possible to do all fields selected, or only one in SQL? if do all col names here it will blow up...
-                FieldInfo fi = fieldInfoArray[0];
-                MNode aliasNode = fi.fieldNode;
-                String aliasFunction = aliasNode != null ? aliasNode.attribute("function") : null;
-                if (aliasFunction != null && aliasFunction.length() > 0) {
-                    // if the field has a function already we don't want to count just it, would be meaningless
-                    sqlTopLevel.append("COUNT(DISTINCT *) ");
-                } else {
-                    sqlTopLevel.append("COUNT(DISTINCT ");
-                    sqlTopLevel.append(fi.getFullColumnName());
-                    sqlTopLevel.append(")");
-                }
-            } else {
-                sqlTopLevel.append("COUNT(DISTINCT *) ");
-            }
+    public void makeCountFunction(FieldInfo[] fieldInfoArray, FieldOrderOptions[] fieldOptionsArray, boolean isDistinct, boolean isGroupBy) {
+        int fiaLength = fieldInfoArray.length;
+        if (isGroupBy || (isDistinct && fiaLength > 0)) {
+            sqlTopLevel.append("COUNT(*) FROM (SELECT ");
+            if (isDistinct) sqlTopLevel.append("DISTINCT ");
+            makeSqlSelectFields(fieldInfoArray, fieldOptionsArray, true);
+            // NOTE: this will be closed by closeCountSubSelect()
         } else {
-            // NOTE: on H2 COUNT(*) is faster than COUNT(1) (and perhaps other databases? docs hint may be faster in MySQL)
-            sqlTopLevel.append("COUNT(*) ");
+            if (isDistinct) {
+                sqlTopLevel.append("COUNT(DISTINCT *) ");
+            } else {
+                // NOTE: on H2 COUNT(*) is faster than COUNT(1) (and perhaps other databases? docs hint may be faster in MySQL)
+                sqlTopLevel.append("COUNT(*) ");
+            }
         }
     }
 
-    public void closeCountFunctionIfGroupBy() {
-        if (getMainEntityDefinition().entityInfo.hasFunctionAlias) sqlTopLevel.append(") TEMP_NAME");
+    public void closeCountSubSelect(int fiaLength, boolean isDistinct, boolean isGroupBy) {
+        if (isGroupBy || (isDistinct && fiaLength > 0)) sqlTopLevel.append(") TEMP_NAME");
     }
 
     public void expandJoinFromAlias(final MNode entityNode, final String searchEntityAlias, Set<String> entityAliasUsedSet,
@@ -295,12 +272,13 @@ public class EntityFindBuilder extends EntityQueryBuilder {
                 localBuilder.append(" ").append(entityAlias).append(" ON ");
 
                 ArrayList<MNode> keyMaps = relatedMemberEntityNode.children("key-map");
-                if (keyMaps == null || keyMaps.size() == 0) {
+                ArrayList<MNode> entityConditionList = relatedMemberEntityNode.children("entity-condition");
+                if ((keyMaps == null || keyMaps.size() == 0) && (entityConditionList == null || entityConditionList.size() == 0)) {
                     throw new IllegalArgumentException("No member-entity/join key-maps found for the " + joinFromAlias +
                             " and the " + entityAlias + " member-entities of the " + localEntityDefinition.fullEntityName + " view-entity.");
                 }
 
-                int keyMapsSize = keyMaps.size();
+                int keyMapsSize = keyMaps != null ? keyMaps.size() : 0;
                 for (int i = 0; i < keyMapsSize; i++) {
                     MNode keyMap = keyMaps.get(i);
                     if (i > 0) localBuilder.append(" AND ");
@@ -329,12 +307,11 @@ public class EntityFindBuilder extends EntityQueryBuilder {
                     // localBuilder.append(sanitizeColumnName(relatedLinkEntityDefinition.getColumnName(relatedFieldName, false)))
                 }
 
-                ArrayList<MNode> entityConditionList = relatedMemberEntityNode.children("entity-condition");
                 if (entityConditionList != null && entityConditionList.size() > 0) {
                     // add any additional manual conditions for the member-entity view link here
                     MNode entityCondition = entityConditionList.get(0);
                     EntityConditionImplBase linkEcib = localEntityDefinition.makeViewListCondition(entityCondition);
-                    localBuilder.append(" AND ");
+                    if (keyMapsSize > 0) localBuilder.append(" AND ");
                     linkEcib.makeSqlWhere(this);
                 }
 
@@ -413,9 +390,7 @@ public class EntityFindBuilder extends EntityQueryBuilder {
         }
     }
 
-    public void startWhereClause() {
-        sqlTopLevel.append(" WHERE ");
-    }
+    public void startWhereClause() { sqlTopLevel.append(" WHERE "); }
 
     public void makeGroupByClause(FieldInfo[] fieldInfoArray) {
         EntityJavaUtil.EntityInfo entityInfo = getMainEntityDefinition().entityInfo;
@@ -450,9 +425,7 @@ public class EntityFindBuilder extends EntityQueryBuilder {
         }
     }
 
-    public void startHavingClause() {
-        sqlTopLevel.append(" HAVING ");
-    }
+    public void startHavingClause() { sqlTopLevel.append(" HAVING "); }
 
     public void makeOrderByClause(ArrayList<String> orderByFieldList) {
         int obflSize = orderByFieldList.size();

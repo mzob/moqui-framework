@@ -121,6 +121,15 @@ along with this software (see the LICENSE.md file). If not, see
                     Default is false and an exception will be thrown if there is extra path that does not match a
                     subscreen, a transition, or content below the screen.</xs:documentation></xs:annotation>
             </xs:attribute>
+            <xs:attribute name="server-static" type="xs:string">
+                <xs:annotation><xs:documentation>
+                    The render modes where the results of this screen are always the same and the screen render results may be cached (on server and/or client).
+                    This applies to all screens that are designed for client rendering when the screen is written to fully support it (filling in data with additional requests).
+                    Placeholder screens are automatically server static, ie with just subscreens-panel, subscreens-active, and subscreens-menu elements.
+                    Can be any valid render mode. Default supported modes include: text, html, vuet, xsl-fo, xml, and csv.
+                    Values can be comma separated to apply to multiple render modes. A value of "any" will apply to all render modes.
+                </xs:documentation></xs:annotation>
+            </xs:attribute>
         </xs:complexType>
     </xs:element>
     <xs:element name="macro-template">
@@ -506,7 +515,6 @@ along with this software (see the LICENSE.md file). If not, see
                 <xs:simpleType><xs:restriction base="xs:token">
                     <xs:enumeration value="tab"/>
                     <xs:enumeration value="popup"/>
-                    <xs:enumeration value="popup-tree"/>
                 </xs:restriction></xs:simpleType>
             </xs:attribute>
             <xs:attribute name="id" type="xs:string" use="required"/>
@@ -532,8 +540,6 @@ along with this software (see the LICENSE.md file). If not, see
             </xs:attribute>
             <xs:attribute name="id" type="xs:string" use="required"/>
             <xs:attribute name="title" type="xs:string"/>
-            <xs:attribute name="menu-width" type="xs:string"/>
-            <xs:attribute name="dynamic" type="boolean" default="false"/>
             <xs:attribute name="header-menus-id" type="xs:string" default="header-menus"/>
         </xs:complexType>
     </xs:element>
@@ -631,6 +637,8 @@ along with this software (see the LICENSE.md file). If not, see
                         <xs:enumeration value="span"/>
                         <xs:enumeration value="ul"/>
                         <xs:enumeration value="li"/>
+                        <xs:enumeration value="dl"/>
+                        <xs:enumeration value="dd"/>
                         <xs:enumeration value="header"/>
                         <xs:enumeration value="footer"/>
                         <xs:enumeration value="code"/>
@@ -704,10 +712,6 @@ along with this software (see the LICENSE.md file). If not, see
                 <xs:element ref="panel-footer" minOccurs="0"/>
             </xs:sequence>
             <xs:attribute name="id" type="xs:string"/>
-            <xs:attribute name="dynamic" default="false" type="boolean"><xs:annotation><xs:documentation>
-                When true uses a dynamic layout, by default with jQuery Layout (see http://layout.jquery-dev.net/).
-                When false (default) uses a static HTML/CSS layout.
-            </xs:documentation></xs:annotation></xs:attribute>
         </xs:complexType>
     </xs:element>
     <xs:attributeGroup name="attlist.panel.header-footer">
@@ -764,6 +768,7 @@ along with this software (see the LICENSE.md file). If not, see
             <xs:attribute name="button-text" type="xs:string" use="required"/>
             <xs:attribute name="width" type="xs:string" default="760"/>
             <xs:attribute name="height" type="xs:string" default="600"/>
+            <xs:attribute name="condition" type="xs:string"/>
         </xs:complexType>
     </xs:element>
     <xs:element name="dynamic-dialog" substitutionGroup="StandaloneFields">
@@ -778,6 +783,7 @@ along with this software (see the LICENSE.md file). If not, see
             <xs:attribute name="transition" type="xs:string" use="required"/>
             <xs:attribute name="parameter-map" type="xs:string"><xs:annotation><xs:documentation>A Map to get parameter
                 names and values from in addition to the parameter sub-elements.</xs:documentation></xs:annotation></xs:attribute>
+            <xs:attribute name="condition" type="xs:string"/>
         </xs:complexType>
     </xs:element>
     <xs:element name="dynamic-container" substitutionGroup="StandaloneFields">
@@ -822,7 +828,8 @@ along with this software (see the LICENSE.md file). If not, see
                 <xs:element maxOccurs="unbounded" ref="tree-sub-node"/>
             </xs:sequence>
             <xs:attribute type="xs:string" name="name" use="required"/>
-            <xs:attribute type="xs:string" name="transition" default="getTreeSubNodes"/>
+            <xs:attribute type="xs:string" name="transition">
+                <xs:annotation><xs:documentation>If not specified uses actions/${tree.@name}</xs:documentation></xs:annotation></xs:attribute>
             <xs:attribute type="xs:string" name="open-path" use="optional"/>
             <!-- <xs:attribute type="xs:string" name="open-depth" default="0"/> -->
         </xs:complexType>
@@ -867,7 +874,8 @@ along with this software (see the LICENSE.md file). If not, see
                 <xs:extension base="xs:string">
                     <xs:attribute name="type" type="xs:string" default="any">
                         <xs:annotation><xs:documentation>
-                            Can be anything. Default supported values include: text, cwiki, html, xsl-fo, xml, and csv.
+                            Can be any valid render mode. Default supported modes include: text, html, vuet, xsl-fo, xml, and csv.
+                            Values can be comma separated to apply to multiple render modes.
                             A value of "any" will cause it to be used if no other element matches the current output type.
                         </xs:documentation></xs:annotation>
                     </xs:attribute>

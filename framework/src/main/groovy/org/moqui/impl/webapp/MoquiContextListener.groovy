@@ -77,11 +77,9 @@ class MoquiContextListener implements ServletContextListener {
                 String filterName = filterNode.attribute("name")
                 try {
                     Filter filter = (Filter) Thread.currentThread().getContextClassLoader().loadClass(filterNode.attribute("class")).newInstance()
-                    MapFilterConfig filterConfig = new MapFilterConfig(filterName, sc)
-                    for (MNode initParamNode in filterNode.children("init-param"))
-                        filterConfig.setParameter(initParamNode.attribute("name"), initParamNode.attribute("value") ?: "")
-                    filter.init(filterConfig)
                     FilterRegistration.Dynamic filterReg = sc.addFilter(filterName, filter)
+                    for (MNode initParamNode in filterNode.children("init-param"))
+                        filterReg.setInitParameter(initParamNode.attribute("name"), initParamNode.attribute("value") ?: "")
 
                     EnumSet<DispatcherType> dispatcherTypes = EnumSet.noneOf(DispatcherType.class)
                     for (MNode dispatcherNode in filterNode.children("dispatcher"))
@@ -216,14 +214,10 @@ class MoquiContextListener implements ServletContextListener {
             this.sc = sc
         }
         void setParameter(String name, String value) { parameters.put(name, value) }
-        @Override
-        String getFilterName() { return name }
-        @Override
-        ServletContext getServletContext() { return sc }
-        @Override
-        String getInitParameter(String name) { return parameters.get(name) }
-        @Override
-        Enumeration<String> getInitParameterNames() { return Collections.enumeration(parameters.keySet()) }
+        @Override String getFilterName() { return name }
+        @Override ServletContext getServletContext() { return sc }
+        @Override String getInitParameter(String name) { return parameters.get(name) }
+        @Override Enumeration<String> getInitParameterNames() { return Collections.enumeration(parameters.keySet()) }
     }
     static class MapServletConfig implements ServletConfig {
         private String name
@@ -234,14 +228,10 @@ class MoquiContextListener implements ServletContextListener {
             this.sc = sc
         }
         void setParameter(String name, String value) { parameters.put(name, value) }
-        @Override
-        String getServletName() { return name }
-        @Override
-        ServletContext getServletContext() { return sc }
-        @Override
-        String getInitParameter(String name) { return parameters.get(name) }
-        @Override
-        Enumeration<String> getInitParameterNames() { return Collections.enumeration(parameters.keySet()) }
+        @Override String getServletName() { return name }
+        @Override ServletContext getServletContext() { return sc }
+        @Override String getInitParameter(String name) { return parameters.get(name) }
+        @Override Enumeration<String> getInitParameterNames() { return Collections.enumeration(parameters.keySet()) }
     }
     static class MoquiServerEndpointConfigurator extends ServerEndpointConfig.Configurator {
         // for a good explanation of javax.websocket details related to this see:
@@ -260,7 +250,7 @@ class MoquiContextListener implements ServletContextListener {
         }
 
         @Override
-        public void modifyHandshake(ServerEndpointConfig config, HandshakeRequest request, HandshakeResponse response) {
+        void modifyHandshake(ServerEndpointConfig config, HandshakeRequest request, HandshakeResponse response) {
             config.getUserProperties().put("handshakeRequest", request)
             config.getUserProperties().put("httpSession", request.getHttpSession())
             config.getUserProperties().put("executionContextFactory", ecfi)

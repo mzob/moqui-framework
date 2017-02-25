@@ -57,15 +57,17 @@ import javax.servlet.ServletContext
 import javax.servlet.http.HttpServletRequest
 import javax.websocket.server.ServerContainer
 import java.lang.management.ManagementFactory
+import java.lang.management.ThreadInfo
+import java.lang.management.ThreadMXBean
 import java.sql.Timestamp
 import java.util.concurrent.BlockingQueue
 import java.util.concurrent.ConcurrentLinkedQueue
-import java.util.concurrent.ExecutorService
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.ThreadFactory
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.jar.Attributes
 import java.util.jar.JarFile
@@ -78,7 +80,7 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
     protected final static Logger logger = LoggerFactory.getLogger(ExecutionContextFactoryImpl.class)
     protected final static boolean isTraceEnabled = logger.isTraceEnabled()
     
-    private boolean destroyed = false
+    private AtomicBoolean destroyed = new AtomicBoolean(false)
     
     protected String runtimePath
     @SuppressWarnings("GrFinalVariableAccess") protected final String runtimeConfPath
@@ -99,6 +101,7 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
 
     protected LinkedHashMap<String, ComponentInfo> componentInfoMap = new LinkedHashMap<>()
     public final ThreadLocal<ExecutionContextImpl> activeContext = new ThreadLocal<>()
+    protected final Map<Long, ExecutionContextImpl> activeContextMap = new HashMap<>()
     protected final LinkedHashMap<String, ToolFactory> toolFactoryMap = new LinkedHashMap<>()
 
     protected final Map<String, WebappInfo> webappInfoMap = new HashMap<>()
@@ -135,7 +138,7 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
     @SuppressWarnings("GrFinalVariableAccess") public final ScreenFacadeImpl screenFacade
 
     /** The main worker pool for services, running async closures and runnables, etc */
-    @SuppressWarnings("GrFinalVariableAccess") public final ExecutorService workerPool
+    @SuppressWarnings("GrFinalVariableAccess") public final ThreadPoolExecutor workerPool
     /** An executor for the scheduled job runner */
     public final ScheduledThreadPoolExecutor scheduledExecutor = new ScheduledThreadPoolExecutor(2)
 
@@ -150,7 +153,7 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
         // get the MoquiInit.properties file
         Properties moquiInitProperties = new Properties()
         URL initProps = this.class.getClassLoader().getResource("MoquiInit.properties")
-        if (initProps != null) { InputStream is = initProps.openStream(); moquiInitProperties.load(is); is.close(); }
+        if (initProps != null) { InputStream is = initProps.openStream(); moquiInitProperties.load(is); is.close() }
 
         // if there is a system property use that, otherwise from the properties file
         runtimePath = System.getProperty("moqui.runtime")
@@ -351,7 +354,7 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
         private final AtomicInteger threadNumber = new AtomicInteger(1)
         Thread newThread(Runnable r) { return new Thread(workerGroup, r, "MoquiWorker-" + threadNumber.getAndIncrement()) }
     }
-    private ExecutorService makeWorkerPool() {
+    private ThreadPoolExecutor makeWorkerPool() {
         MNode toolsNode = confXmlRoot.first('tools')
 
         int workerQueueSize = (toolsNode.attribute("worker-queue") ?: "65536") as int
@@ -368,6 +371,17 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
 
         logger.info("Initializing worker ThreadPoolExecutor: queue limit ${workerQueueSize}, pool-core ${coreSize}, pool-max ${maxSize}, pool-alive ${aliveTime}s")
         return new ThreadPoolExecutor(coreSize, maxSize, aliveTime, TimeUnit.SECONDS, workQueue, new WorkerThreadFactory())
+    }
+    boolean waitWorkerPoolEmpty(int retryLimit) {
+        int count = 0
+        logger.warn("Wait for workerPool empty: queue size ${workerPool.getQueue().size()} active ${workerPool.getActiveCount()}")
+        while (count < retryLimit && (workerPool.getQueue().size() > 0 || workerPool.getActiveCount() > 0)) {
+            Thread.sleep(100)
+            count++
+        }
+        int afterSize = workerPool.getQueue().size() + workerPool.getActiveCount()
+        if (afterSize > 0) logger.warn("After ${retryLimit} 100ms waits worker pool size is still ${afterSize}")
+        return afterSize == 0
     }
 
     private void preFacadeInit() {
@@ -592,12 +606,11 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
         }
     }
 
-    @Override synchronized void destroy() {
-        if (destroyed) {
+    @Override void destroy() {
+        if (destroyed.getAndSet(true)) {
             logger.warn("Not destroying ExecutionContextFactory, already destroyed (or destroying)")
             return
         }
-        destroyed = true
 
         // persist any remaining bins in artifactHitBinByType
         Timestamp currentTimestamp = new Timestamp(System.currentTimeMillis())
@@ -621,6 +634,7 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
 
             scheduledExecutor.awaitTermination(30, TimeUnit.SECONDS)
             logger.info("Scheduled executor pool shut down")
+            logger.info("Shutting down worker pool")
             workerPool.awaitTermination(30, TimeUnit.SECONDS)
             logger.info("Worker pool shut down")
         } catch (Throwable t) { logger.error("Error in workerPool/scheduledExecutor shutdown", t) }
@@ -634,13 +648,30 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
         for (ToolFactory tf in toolFactoryList) {
             logger.info("Destroying ToolFactory: ${tf.getName()}")
             // NOTE: also calling System.out.println because log4j gets often gets closed before this completes
-            System.out.println("Destroying ToolFactory: ${tf.getName()}")
+            // System.out.println("Destroying ToolFactory: ${tf.getName()}")
             try {
                 tf.destroy()
             } catch (Throwable t) {
                 logger.error("Error destroying ToolFactory ${tf.getName()}", t)
             }
         }
+
+        /* use to watch destroy issues:
+        if (activeContextMap.size() > 2) {
+            Set<Long> threadIds = activeContextMap.keySet()
+            ThreadMXBean threadMXBean = ManagementFactory.getThreadMXBean()
+            for (Long threadId in threadIds) {
+                ThreadInfo threadInfo = threadMXBean.getThreadInfo(threadId)
+                if (threadInfo == null) continue
+                logger.warn("Active execution context in thread ${threadInfo.threadId}:${threadInfo.getThreadName()} state ${threadInfo.getThreadState()} blocked ${threadInfo.getBlockedCount()} lock ${threadInfo.getLockInfo()}")
+            }
+            for (ThreadInfo threadInfo in threadMXBean.dumpAllThreads(true, true)) {
+                System.out.println()
+                System.out.println(threadInfo.toString())
+                // for (StackTraceElement ste in threadInfo.stackTrace) System.out.println("    ste " + ste.toString())
+            }
+        }
+        */
 
         // this destroy order is important as some use others so must be destroyed first
         if (this.serviceFacade != null) this.serviceFacade.destroy()
@@ -714,7 +745,7 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
     /** This is called when message received from topic (possibly distributed) */
     void notifyNotificationMessageListeners(NotificationMessageImpl nmi) {
         // process notifications in the worker thread pool
-        ExecutionContextImpl.ThreadPoolRunnable runnable = new ExecutionContextImpl.ThreadPoolRunnable(this, null, {
+        ExecutionContextImpl.ThreadPoolRunnable runnable = new ExecutionContextImpl.ThreadPoolRunnable(this, {
             int nmlSize = registeredNotificationMessageListeners.size()
             for (int i = 0; i < nmlSize; i++) {
                 NotificationMessageListener nml = (NotificationMessageListener) registeredNotificationMessageListeners.get(i)
@@ -777,19 +808,21 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
         ExecutionContextImpl ec = (ExecutionContextImpl) activeContext.get()
         if (ec != null) return ec
 
-        if (logger.traceEnabled) logger.trace("Creating new ExecutionContext in thread [${Thread.currentThread().id}:${Thread.currentThread().name}]")
-        if (!Thread.currentThread().getContextClassLoader().is(groovyClassLoader))
-            Thread.currentThread().setContextClassLoader(groovyClassLoader)
-        ec = new ExecutionContextImpl(this)
+        Thread currentThread = Thread.currentThread()
+        if (logger.traceEnabled) logger.trace("Creating new ExecutionContext in thread [${currentThread.id}:${currentThread.name}]")
+        if (!currentThread.getContextClassLoader().is(groovyClassLoader)) currentThread.setContextClassLoader(groovyClassLoader)
+        ec = new ExecutionContextImpl(this, currentThread)
         this.activeContext.set(ec)
+        this.activeContextMap.put(currentThread.id, ec)
         return ec
     }
 
     void destroyActiveExecutionContext() {
         ExecutionContext ec = this.activeContext.get()
-        if (ec) {
+        if (ec != null) {
             ec.destroy()
             this.activeContext.remove()
+            this.activeContextMap.remove(Thread.currentThread().id)
         }
     }
 
@@ -892,7 +925,7 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
         def gcMXBeans = ManagementFactory.getGarbageCollectorMXBeans()
         def gcCount = 0
         def gcTime = 0
-        for (def gcMXBean in gcMXBeans) {
+        for (gcMXBean in gcMXBeans) {
             gcCount += gcMXBean.getCollectionCount()
             gcTime += gcMXBean.getCollectionTime()
         }
@@ -989,7 +1022,7 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
         }
 
         // now create a new Map and replace the original
-        Map<String, ComponentInfo> newMap = new LinkedHashMap<String, ComponentInfo>()
+        LinkedHashMap<String, ComponentInfo> newMap = new LinkedHashMap<String, ComponentInfo>()
         for (String sortedName in sortedNames) newMap.put(sortedName, componentInfoMap.get(sortedName))
         componentInfoMap = newMap
     }
@@ -1078,11 +1111,11 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
 
             // support component zip files, expand now and replace name and location
             if (location.endsWith(".zip")) {
-                ResourceReference zipRr = ecfi.getResourceReference(location)
+                ResourceReference zipRr = getResourceReference(location)
                 if (!zipRr.supportsExists()) throw new IllegalArgumentException("Could component location ${location} does not support exists, cannot use as a component location")
                 // make sure corresponding directory does not exist
                 String locNoZip = stripVersionFromName(location.substring(0, location.length() - 4))
-                ResourceReference noZipRr = ecfi.getResourceReference(locNoZip)
+                ResourceReference noZipRr = getResourceReference(locNoZip)
                 if (zipRr.getExists() && !noZipRr.getExists()) {
                     // NOTE: could use getPath() instead of toExternalForm().substring(5) for file specific URLs, will work on Windows?
                     String zipPath = zipRr.getUrl().toExternalForm().substring(5)
@@ -1095,7 +1128,7 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
                         ZipEntry entry = zipIn.getNextEntry()
                         // iterates over entries in the zip file
                         while (entry != null) {
-                            ResourceReference entryRr = ecfi.getResourceReference(targetDirLocation + '/' + entry.getName())
+                            ResourceReference entryRr = getResourceReference(targetDirLocation + '/' + entry.getName())
                             String filePath = entryRr.getUrl().toExternalForm().substring(5)
                             if (entry.isDirectory()) {
                                 File dir = new File(filePath)
@@ -1129,7 +1162,7 @@ class ExecutionContextFactoryImpl implements ExecutionContextFactory {
             version = "unknown"
 
             // make sure directory exists
-            componentRr = ecfi.getResourceReference(location)
+            componentRr = getResourceReference(location)
             if (!componentRr.supportsExists()) throw new IllegalArgumentException("Could component location ${location} does not support exists, cannot use as a component location")
             if (!componentRr.getExists()) throw new IllegalArgumentException("Could not find component directory at: ${location}")
             if (!componentRr.isDirectory()) throw new IllegalArgumentException("Component location is not a directory: ${location}")
